@@ -186,7 +186,7 @@ pub fn send_to_bedrock_sync(prompt: &str) -> Result<String, Error> {
         // 4. Call the model.
         let resp = client
             .converse()
-            .model_id("us.meta.llama4-scout-17b-instruct-v1:0")
+            .model_id("us.meta.llama4-maverick-17b-instruct-v1:0")
             .messages(user_msg)
             .inference_config(inf_cfg)
             .send()
@@ -226,30 +226,31 @@ pub fn analyze_build_logs() -> Result<String, Error> {
     let all_logs = collect_build_logs();
 
     let prompt = format!(
-        r#"You are an expert Rust build and log‐analysis assistant.
-
+    r#"You are an expert Rust build and log-analysis assistant. You must follow the instructions to analyze the following build logs. Do not include any additional pleasantries in your reseponse.
+        In your analysus, you must be very accurate and precise, and you must clearly understand the sequence of events.
+        
         ## Brief Summary  
-        Provide exactly two sentences summarizing what happened.
+        Provide two to three sentences summarizing what happened.
 
         ## Errors, Warnings, and Likely Causes  
         List any errors or warnings (with line numbers if available) and your best guess at their causes.  
         If none are found, omit this section entirely.
 
         ## Anomalies or Performance Observations  
-        Highlight any unusual timings, retransmissions, stalls, or patterns that could indicate inefficiencies.  
-        If there’s nothing notable, skip this section.
+        Highlight any unusual timings, repeated retransmissions, stalls, or patterns that could indicate inefficiencies.
+        If there's nothing notable, you may skip this section.
 
         ## Conclusion  
         If everything is clean, respond with exactly one concise sentence:  
         “No issues detected. Build succeeded cleanly.”  
-        Otherwise, summarize in one sentence.
+        Otherwise, summarize in one-two sentences and suggest next actionable steps for investigation.
 
         —BEGIN LOGS—  
         {}  
         —END LOGS—  
         "#,
-        all_logs
-    );
+            all_logs
+        );
 
     send_to_bedrock_sync(&prompt)
 }
