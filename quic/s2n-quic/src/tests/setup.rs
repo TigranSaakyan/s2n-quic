@@ -17,6 +17,12 @@ use once_cell::sync::Lazy;
 use std::sync::{Arc, Mutex};
 use std::io::Write;
 use tracing_subscriber::fmt::writer::TestWriter;
+use aws_sdk_bedrockruntime::{
+    Client as BedrockClient,
+    Error,
+    types::{Message, ConversationRole, ContentBlock, InferenceConfiguration},
+};
+use bach::time::scheduler::{self, Scheduler};
 
 pub static SERVER_CERTS: (&str, &str) = (certificates::CERT_PEM, certificates::KEY_PEM);
 
@@ -144,6 +150,106 @@ pub fn build_server(handle: &Handle) -> Result<Server> {
 pub fn client(handle: &Handle, server_addr: SocketAddr) -> Result {
     let client = build_client(handle)?;
     start_client(client, server_addr, Data::new(10_000))
+}
+
+/// Send a single prompt to Bedrock via the Conversation API and block for the reply.
+pub fn send_to_bedrock_sync(prompt: &str) -> Result<String, Error> {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    rt.block_on(async move {
+        // 1. Load config (avoid the deprecated `from_env` helper).
+        let config = aws_config::defaults(aws_config::BehaviorVersion::latest())
+            .region("us-east-1")
+            .load()
+            .await;
+        let client = BedrockClient::new(&config);
+
+        // 2. Build the *user* message.
+        //
+        // `ContentBlock` is a *union* (an enum in Rust) – it has no
+        // `builder()` method.  Use the `Text` variant directly.
+        let user_msg = Message::builder()
+            .role(ConversationRole::User)
+            .content(ContentBlock::Text(prompt.to_owned()))
+            .build()?;          // `build()` → Result<_, BuildError>
+
+        // 3. Inference parameters.
+        let inf_cfg = InferenceConfiguration::builder()
+            .temperature(0.8)
+            .top_p(0.9)
+            .build();
+
+        // 4. Call the model.
+        let resp = client
+            .converse()
+            .model_id("us.meta.llama4-scout-17b-instruct-v1:0")
+            .messages(user_msg)
+            .inference_config(inf_cfg)
+            .send()
+            .await?;
+
+        // 5. Pull the first text chunk out of the reply:
+        //    outer `output()` → Option<&types::ConverseOutput>
+        //    inner `as_message()` unwraps the `Message` variant
+        //    finally scan the content blocks for the first `Text` field.
+        let reply_text = resp
+            .output()
+            .and_then(|o| o.as_message().ok())          // `ConverseOutput::Message`
+            .and_then(|m| {
+                m.content().iter().find_map(|c| {
+                    if let ContentBlock::Text(t) = c { Some(t.clone()) } else { None }
+                })
+            })
+            .unwrap_or_default();
+
+        Ok(reply_text)
+    })
+}
+
+fn init_scheduler() -> Option<scheduler::Handle> {
+    scheduler::scope::set(Some(Scheduler::new().handle()))
+}
+
+/// Grab everything from the in-memory logger and return a UTF-8 String.
+pub fn collect_build_logs() -> String {
+    let data = LOG_BUFFER.lock().unwrap().clone();
+    String::from_utf8_lossy(&data).into_owned()
+}
+
+/// Build the Bedrock prompt around the logs and send for analysis.
+pub fn analyze_build_logs() -> Result<String, Error> {
+    let _restore = init_scheduler();
+    let all_logs = collect_build_logs();
+
+    let prompt = format!(
+        r#"You are an expert Rust build and log‐analysis assistant.
+
+        ## Brief Summary  
+        Provide exactly two sentences summarizing what happened.
+
+        ## Errors, Warnings, and Likely Causes  
+        List any errors or warnings (with line numbers if available) and your best guess at their causes.  
+        If none are found, omit this section entirely.
+
+        ## Anomalies or Performance Observations  
+        Highlight any unusual timings, retransmissions, stalls, or patterns that could indicate inefficiencies.  
+        If there’s nothing notable, skip this section.
+
+        ## Conclusion  
+        If everything is clean, respond with exactly one concise sentence:  
+        “No issues detected. Build succeeded cleanly.”  
+        Otherwise, summarize in one sentence.
+
+        —BEGIN LOGS—  
+        {}  
+        —END LOGS—  
+        "#,
+        all_logs
+    );
+
+    send_to_bedrock_sync(&prompt)
 }
 
 pub fn start_client(client: Client, server_addr: SocketAddr, data: Data) -> Result {

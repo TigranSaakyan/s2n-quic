@@ -104,4 +104,8 @@ fn buffer_limit_test() {
         TlsError::UNEXPECTED_MESSAGE
     };
     assert_eq!(code, transport::Error::from(expected_error).code);
+
+    let reply = analyze_build_logs()
+        .expect("log analysis failed");
+    println!("{}", reply);
 }
