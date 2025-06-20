@@ -13,8 +13,38 @@ use crate::{
 use rand::{Rng, RngCore};
 use s2n_quic_core::{crypto::tls::testing::certificates, havoc, stream::testing::Data};
 use std::net::SocketAddr;
+use once_cell::sync::Lazy;
+use std::sync::{Arc, Mutex};
+use std::io::Write;
+use tracing_subscriber::fmt::writer::TestWriter;
 
 pub static SERVER_CERTS: (&str, &str) = (certificates::CERT_PEM, certificates::KEY_PEM);
+
+pub static LOG_BUFFER: Lazy<Arc<Mutex<Vec<u8>>>> = Lazy::new(|| Arc::new(Mutex::new(Vec::new())));
+
+/// Writes into our LOG_BUFFER
+struct BufferWriter(Arc<Mutex<Vec<u8>>>);
+impl Write for BufferWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        let mut buf = self.0.lock().unwrap();
+        buf.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+}
+
+/// Fan-out writer: first W1, then W2
+struct MultiWriter<W1, W2>(W1, W2);
+impl<W1: Write, W2: Write> Write for MultiWriter<W1, W2> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let n = self.0.write(buf)?;
+        self.1.write_all(buf)?;
+        Ok(n)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.0.flush().and_then(|_| self.1.flush())
+    }
+}
 
 pub fn tracing_events() -> event::tracing::Subscriber {
     use std::sync::Once;
@@ -50,7 +80,13 @@ pub fn tracing_events() -> event::tracing::Subscriber {
         tracing_subscriber::fmt()
             .with_env_filter(env_filter)
             .event_format(format)
-            .with_test_writer()
+            .with_writer(|| {
+                // TestWriter prints to the console exactly as before…
+                let console = TestWriter::new();
+                // …and BufferWriter grabs every byte into LOG_BUFFER.
+                let buffer = BufferWriter(LOG_BUFFER.clone());
+                MultiWriter(console, buffer)
+            })
             .init();
     });
 
